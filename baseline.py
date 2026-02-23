@@ -218,13 +218,15 @@ if __name__ == "__main__":
     from tslearn.datasets import UCR_UEA_datasets
     from sklearn.preprocessing import LabelEncoder
     from torch.utils.data import TensorDataset, DataLoader
+    from dataloader import build_lsst_dataloader
 
     # 1) Charger LSST
     ds = UCR_UEA_datasets()
     X_train, y_train, X_test, y_test = ds.load_dataset(
         "LSST"
     )  # X: (N, T, C), y: strings
-
+    # train_dl, val_dl, test_dl = build_lsst_dataloader( ##Très peu efficace, à revoir
+    #    X_train, y_train, X_test, y_test,batch_size=64,shuffle=False, drop_last=False)
     # 2) Encoder les labels (string -> int 0..C-1)
     le = LabelEncoder()
     y_train_enc = le.fit_transform(y_train)
