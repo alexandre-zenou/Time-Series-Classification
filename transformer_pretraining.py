@@ -1,11 +1,6 @@
 import numpy
 import torch
-from torch.utils.data import Dataset, DataLoader
-import numpy
-import torch
 import torch.nn as nn
-import matplotlib.pyplot as plt
-from torch.utils.data import Dataset, DataLoader
 
 
 # Reuse ETTh1Dataset from Lab 2 without scaling (we will use RevIn normalization layers)
@@ -284,21 +279,35 @@ class IndPatchTST(nn.Module):
         patches = torch.stack(patches, dim=1)  # (batch, num_patches, patch_len * c)
         return patches
 
-    def forward(self, x):
-        # X: (B,T,C)
+    def forward_features(self, x):
+        # x: (B, T, C)
         if self.revin:
             x = self.revin_layer(x, mode="norm")
+
         B, T, C = x.shape
-        x = x.permute((0, 2, 1))  # B,C,T
-        x = x.reshape(B * C, T, 1)
-        patches = self.create_patches(x)
-        patches = self.patch_embedding(patches)
-        patches = patches + self.pos_encoding
-        patches = self.transformer(patches)  # (B*C,P,model_dim)
-        patches = patches.reshape(B, C, -1, self.d_model)
-        x = self.head(patches.mean(dim=(1, 2)))[:, :, None]  # Y true (B,H,1)
+        # on traite chaque canal comme une série univariée indépendante
+        x = x.permute(0, 2, 1)  # (B, C, T)
+        x = x.reshape(B * C, T, 1)  # (B*C, T, 1)
+
+        patches = self.create_patches(x)  # (B*C, num_patches, patch_len * 1)
+        patches = self.patch_embedding(patches)  # (B*C, num_patches, d_model)
+        patches = patches + self.pos_encoding  # (B*C, num_patches, d_model)
+        patches = self.transformer(patches)  # (B*C, num_patches, d_model)
+
+        patches = patches.reshape(
+            B, C, -1, self.d_model
+        )  # (B, C, num_patches, d_model)
+        feats = patches.mean(dim=(1, 2))  # (B, d_model) moyenne sur canaux + patches
+        return feats
+
+    def forward(self, x):
+        # forecasting comme avant, mais en réutilisant forward_features
+        feats = self.forward_features(x)  # (B, d_model)
+        x = self.head(feats)[:, :, None]  # (B, pred_len, 1)
+
         if self.revin:
             x = self.revin_layer(x, mode="denorm")
+
         return x
 
 
@@ -350,19 +359,19 @@ def save_forecast_model(model, path):
 
 if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    window = 96
-    horizon = 24
+    window = 36
+    horizon = 6
     train_dl, valid_dl, input_dim = build_etth1_dataloaders(
         "..\\data\\ETTh1.csv", window=window, horizon=horizon
     )
     print(f"Input dimension: {input_dim}")
-    model1 = PatchTST(
+    model1 = IndPatchTST(
         window,
         horizon,
         num_features=train_dl.dataset.feats.shape[1],
-        patch_len=1,
-        stride=1,
-        revin=True,
+        patch_len=2,
+        stride=2,
+        revin=False,
     )
     optimizer = torch.optim.Adam(model1.parameters(), 1e-3)
     criterion = nn.MSELoss()
@@ -372,7 +381,7 @@ if __name__ == "__main__":
         valid_dl=valid_dl,
         optimizer=optimizer,
         criterion=criterion,
-        n_epochs=5,
+        n_epochs=10,
         device=device,
     )
     save_forecast_model(model1, "models\\patchtst_etth1.pth")
