@@ -163,7 +163,7 @@ if __name__ == "__main__":
 
     loss_fn = nn.CrossEntropyLoss()
     optimizer = torch.optim.Adam(classification_model.classifier.parameters(), lr=1e-4)
-    n_epochs = 10
+    n_epochs = 6
     best_val_f1 = 0.0
     train_and_valid_loop(
         classification_model,
