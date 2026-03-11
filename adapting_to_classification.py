@@ -1,46 +1,5 @@
 """
 adapting_to_classification.py — Fine-tuning IndPatchTST (ETTh1→LSST)
-
-CORRECTIONS par rapport à la version dégradée (acc=0.039)
-══════════════════════════════════════════════════════════
-Diagnostic : les résultats from-scratch à 0.039 (pire que random=0.071 sur 14 classes)
-indiquaient que le modèle n'apprenait pas du tout, pas simplement un mauvais transfer.
-
-Causes identifiées et corrigées :
-
-1. AUGMENTATION TROP AGRESSIVE
-   - channel_dropout + noise_std=0.03 + scale [0.85, 1.15] sur des séquences
-     courtes (T=36) corrompait les signaux astronomiques multivarés
-   → Retour à jitter léger (noise_std=0.02) + scaling [0.9, 1.1] comme l'original
-
-2. BATCH SIZE TROP GRAND (64 → 32)
-   - LSST train ≈ 3200 samples. Avec batch=64, seulement ~50 steps/epoch,
-     pas assez de gradient updates pour converger
-   → Retour à batch_size=32 (original)
-
-3. HEAD TROP PROFONDE
-   - 3 couches cachées sur un petit dataset (3200 samples, 14 classes)
-     → sur-paramétrage, gradient instable
-   → Retour à 1 couche cachée avec dropout fort (comme l'original)
-     mais avec la taille hidden_dim tunée par Optuna
-
-4. SUPPRESSION DU CLASS WEIGHTS
-   - Bien que LSST soit légèrement déséquilibré, les class_weights peuvent
-     déstabiliser l'entraînement si les poids sont mal calibrés
-   → Conservé mais avec label_smoothing=0.1 uniquement (pas de class weights)
-     sauf si le déséquilibre est > 5:1 (à vérifier avec les données)
-
-5. SCHEDULER CosineAnnealingWarmRestarts
-   - Les restarts réinitialisent le LR trop souvent sur des entraînements courts
-     (30-40 epochs) et empêchent la convergence
-   → Retour à CosineAnnealingLR (original)
-
-AMÉLIORATIONS CONSERVÉES (ne causent pas de dégradation) :
-  - Alignement window=36 avec LSST
-  - n_heads=4 dans le backbone (vs 1)
-  - Mixed Precision AMP (vitesse, pas d'impact sur accuracy)
-  - Justification documentée des stratégies de freeze
-  - Progressive unfreezing (phases 1+2)
 """
 
 import torch
@@ -48,16 +7,11 @@ import torch.nn as nn
 import numpy as np
 from collections import defaultdict
 from sklearn.metrics import f1_score, accuracy_score
-from sklearn.preprocessing import LabelEncoder, StandardScaler
-from sklearn.model_selection import train_test_split
-from torch.utils.data import TensorDataset, DataLoader
-from tslearn.datasets import UCR_UEA_datasets
 from transformer_pretraining import IndPatchTST
 
+LSST_WINDOW = 36
 
-# ══════════════════════════════════════════════════════════════════════════════
-#  AUGMENTATION
-# ══════════════════════════════════════════════════════════════════════════════
+# AUGMENTATION
 
 
 def augment_batch(x, noise_std=0.02):
@@ -72,9 +26,7 @@ def augment_batch(x, noise_std=0.02):
     return x * scale + noise
 
 
-# ══════════════════════════════════════════════════════════════════════════════
 #  MODÈLE CLASSIFICATEUR
-# ══════════════════════════════════════════════════════════════════════════════
 
 
 class IndPatchTSTClassifier(nn.Module):
@@ -624,11 +576,10 @@ def objective_scratch(
 
 
 def run_single_experiment(
-    seed,
-    X_train,
-    y_train_enc,
-    X_test,
-    y_test_enc,
+    seed,  # ← Nouveau : seed pour reproductibilité
+    train_dl,  # ← Directement les DataLoaders
+    val_dl,
+    test_dl,
     backbone_config,
     scratch_config,
     params_head_only,
@@ -652,28 +603,6 @@ def run_single_experiment(
     np.random.seed(seed)
 
     criterion = nn.CrossEntropyLoss(label_smoothing=0.1)
-
-    X_tr, X_val, y_tr, y_val = train_test_split(
-        X_train, y_train_enc, test_size=0.2, stratify=y_train_enc, random_state=seed
-    )
-    train_dl = DataLoader(
-        TensorDataset(torch.from_numpy(X_tr).float(), torch.from_numpy(y_tr).long()),
-        batch_size=32,
-        shuffle=True,
-        drop_last=True,
-    )
-    val_dl = DataLoader(
-        TensorDataset(torch.from_numpy(X_val).float(), torch.from_numpy(y_val).long()),
-        batch_size=32,
-        shuffle=False,
-    )
-    test_dl = DataLoader(
-        TensorDataset(
-            torch.from_numpy(X_test).float(), torch.from_numpy(y_test_enc).long()
-        ),
-        batch_size=32,
-        shuffle=False,
-    )
 
     run_results = {}
 
@@ -811,17 +740,51 @@ def run_single_experiment(
 # ══════════════════════════════════════════════════════════════════════════════
 
 
-def run_statistics(n_runs=15, base_seed=0, **kwargs):
+def run_statistics(n_runs=15, base_seed=0):
+    """
+    15 runs statistiques avec build_lsst_dataloaders (comme baseline.py).
+    Compatible avec le dataloader unifié (normalisation, padding, split stratify).
+    """
     all_results = defaultdict(lambda: {"acc": [], "f1": []})
+
     for i in range(n_runs):
         seed = base_seed + i
         print(f"\n{'#' * 60}")
-        print(f"  RUN {i + 1}/{n_runs}  (seed={seed})")
+        print(f"  RUN {i + 1}/{n_runs} (seed={seed})")
         print(f"{'#' * 60}")
-        for key, metrics in run_single_experiment(seed=seed, **kwargs).items():
+
+        # ✅ Appel direct à build_lsst_dataloaders (comme dans baseline.py)
+        train_dl, val_dl, test_dl, scaler, le, n_classes, n_features = (
+            build_lsst_dataloaders(seed=seed, batch_size=32)
+        )
+
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+        # ── Les 4 stratégies TST avec leurs hyperparams fixes ─────────────────
+        run_results = run_single_experiment(
+            seed=seed,
+            train_dl=train_dl,
+            val_dl=val_dl,
+            test_dl=test_dl,
+            n_classes=n_classes,
+            n_features=n_features,
+            LSST_WINDOW=LSST_WINDOW,
+            device=device,
+            scaler_amp=torch.amp.GradScaler(enabled=device.type == "cuda"),
+            backbone_config=BACKBONE_CONFIG2,
+            scratch_config=scratch_config,
+            params_head_only=params_head_only,
+            params_late_enc=params_late_enc,
+            params_full_tune=params_full_tune,
+            best_scratch_params=best_scratch_train_params,
+        )
+
+        # ── Stockage des résultats par stratégie ──────────────────────────────
+        for key, metrics in run_results.items():
             all_results[key]["acc"].append(metrics["acc"])
             all_results[key]["f1"].append(metrics["f1"])
             all_results[key]["label"] = metrics["label"]
+
     return all_results
 
 
@@ -904,6 +867,11 @@ BACKBONE_CONFIG2 = {
 if __name__ == "__main__":
     import optuna
     import os
+    from dataloader import build_lsst_dataloaders
+
+    train_dl0, val_dl0, test_dl0, scaler, le, n_classes, n_features = (
+        build_lsst_dataloaders(seed=0)
+    )
 
     os.makedirs("models", exist_ok=True)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -912,67 +880,6 @@ if __name__ == "__main__":
     use_amp = device.type == "cuda"
     scaler_amp = torch.amp.GradScaler() if use_amp else None
     print(f"Mixed Precision AMP : {'activé ⚡' if use_amp else 'désactivé'}")
-
-    LSST_WINDOW = 36
-
-    # ── Chargement LSST ──────────────────────────────────────────────────────
-    print("\n── Chargement LSST ──")
-    ds = UCR_UEA_datasets()
-    X_train, y_train, X_test, y_test = ds.load_dataset("LSST")
-
-    le = LabelEncoder()
-    y_train_enc = le.fit_transform(y_train)
-    y_test_enc = le.transform(y_test)
-    n_classes = len(le.classes_)
-    n_features = X_train.shape[2]
-    print(f"Classes : {n_classes} | Features : {n_features}")
-    print(f"Train : {X_train.shape} | Test : {X_test.shape}")
-
-    # Padding/truncation pour aligner sur window=36
-    def pad_truncate(X, tlen):
-        out = []
-        for arr in X:
-            T = arr.shape[0]
-            out.append(
-                arr[:tlen]
-                if T >= tlen
-                else np.vstack(
-                    [arr, np.zeros((tlen - T, arr.shape[1]), dtype=arr.dtype)]
-                )
-            )
-        return np.stack(out)
-
-    X_train = pad_truncate(X_train, LSST_WINDOW)
-    X_test = pad_truncate(X_test, LSST_WINDOW)
-
-    # Normalisation
-    B, T, C = X_train.shape
-    scaler = StandardScaler().fit(X_train.reshape(-1, C))
-    X_train = (
-        scaler.transform(X_train.reshape(-1, C)).reshape(B, T, C).astype(np.float32)
-    )
-    X_test = (
-        scaler.transform(X_test.reshape(-1, C)).reshape(-1, T, C).astype(np.float32)
-    )
-    print(f"✅ Normalisé | train{X_train.shape} test{X_test.shape}")
-
-    # Split fixe pour Optuna
-    X_tr0, X_val0, y_tr0, y_val0 = train_test_split(
-        X_train, y_train_enc, test_size=0.2, stratify=y_train_enc, random_state=42
-    )
-    train_dl0 = DataLoader(
-        TensorDataset(torch.from_numpy(X_tr0).float(), torch.from_numpy(y_tr0).long()),
-        batch_size=32,
-        shuffle=True,
-        drop_last=True,
-    )
-    val_dl0 = DataLoader(
-        TensorDataset(
-            torch.from_numpy(X_val0).float(), torch.from_numpy(y_val0).long()
-        ),
-        batch_size=32,
-        shuffle=False,
-    )
 
     # ── Optuna — 1 étude par stratégie pré-entraînée + 1 pour scratch ────────
     def _make_study(seed=42):
@@ -1049,27 +956,8 @@ if __name__ == "__main__":
 
     # ── 15 runs statistiques ─────────────────────────────────────────────────
     print("\n── Lancement 15 runs statistiques ──")
-    all_results = run_statistics(
-        n_runs=15,
-        base_seed=0,
-        X_train=X_train,
-        y_train_enc=y_train_enc,
-        X_test=X_test,
-        y_test_enc=y_test_enc,
-        backbone_config=BACKBONE_CONFIG2,
-        scratch_config=scratch_config,
-        params_head_only=params_head_only,
-        params_late_enc=params_late_enc,
-        params_full_tune=params_full_tune,
-        best_scratch_params=best_scratch_train_params,
-        n_classes=n_classes,
-        n_features=n_features,
-        LSST_WINDOW=LSST_WINDOW,
-        device=device,
-        scaler_amp=scaler_amp,
-    )
-
-    summary = print_statistics(all_results, baseline=0.40)
+    all_results = run_statistics(n_runs=15, base_seed=0)
+    summary = print_statistics(all_results, baseline=0.546)
 
     torch.save(
         {
