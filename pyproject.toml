@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ts-lsst"
+version = "1.0.0"
+description = "Time-Series Transformers for LSST Classification"
+authors = [{name = "Elyan Rougon", email = "elyan.rougon@polytechnique.edu"}]
+dependencies = [
+    "torch>=2.0.0",
+    "optuna>=3.3.0",
+    "tslearn>=0.6.0",
+    "scikit-learn>=1.3.0",
+    "pandas>=2.0.0",
+    "pyyaml>=6.0"
+]
+
+[project.optional-dependencies]
+dev = [
+    "jupyterlab",
+    "matplotlib",
+    "seaborn",
+    "pyyaml",
+    "pytest>=7.0",
+    "pytest-cov",
+    "black",
+    "ruff",
+    "mypy"
+]
+
+[project.scripts]
+lsst-train = "src.training.adapting_to_classification:main"
+lsst-pretrain = "src.models.indpatchtst:main"
+
+[tool.black]
+line-length = 100
+
+[tool.ruff]
+line-length = 100
+select = ["E", "F", "I", "N", "UP", "B", "Q"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v --cov=src --cov-report=html"

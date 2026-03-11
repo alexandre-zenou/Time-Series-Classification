@@ -1,0 +1,10 @@
+torch>=2.0.0
+torchvision
+optuna>=3.0
+tslearn>=0.5
+scikit-learn>=1.3
+matplotlib
+seaborn
+pandas
+pyyaml
+jupyter

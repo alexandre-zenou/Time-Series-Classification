@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+.coverage
+data/
+artifacts/*
+!artifacts/models/
+!artifacts/models/**/*
+notebooks/*.ipynb_checkpoints/
+.DS_Store
+.env
