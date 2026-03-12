@@ -30,12 +30,76 @@ Does pretraining on ETTh1 improve LSST classification compared to training from 
 ### Hyperparameters
 Tuned with Optuna, **one study per strategy** to avoid cross-strategy bias. Best configs are saved as YAML in `configs/` and reused by evaluation notebooks.
 
+## Technical Analysis (Transformer Transfer)
+### IndPatchTST Backbone
+The model uses a channel-independent Transformer with patching. Each sample is split into temporal patches (`patch_len`, `stride`), then encoded by a Transformer stack. The backbone is pretrained on ETTh1 regression to learn generic temporal structure before being adapted to LSST classification. The implementation is in `src/models/indpatchtst.py`.
+
+### Classification Head
+The classifier wraps the backbone and replaces the regression head with a compact MLP:
+`LayerNorm -> Linear(d_model, hidden_dim) -> GELU -> Dropout -> Linear(hidden_dim, n_classes)`.  
+See `src/models/indpatchtst_classifier.py`.
+
+### Freezing Strategies (What Is Frozen / Unfrozen)
+The backbone is split into groups to control transfer:
+- **Embedding group**: patch projection (low-level features).
+- **Early encoder group**: first half of Transformer layers.
+- **Late encoder group**: second half of Transformer layers.
+- **Classifier**: always trainable.
+
+Strategies:
+- **Scratch**: all parameters trainable (no pretrained weights).
+- **Head-only**: backbone fully frozen, train classifier only.
+- **Late encoders**: unfreeze only late encoder layers + classifier.
+- **Full fine-tune**: unfreeze full backbone + classifier with lower LR on backbone.
+
+These behaviors are implemented in `IndPatchTSTClassifier.freeze_all_backbone`, `unfreeze_late_encoders`, and `unfreeze_all`.
+
+### Comparison With Baseline
+The CNN baseline is a lightweight 1D convolutional model trained on the same LSST preprocessing and split logic. This provides a reference point for whether transfer learning adds value beyond a simple architecture.  
+Baseline model: `src/models/cnn_baseline.py`  
+Baseline training/eval: `src/training/trainer_cnn.py`
+
+### Evaluation Protocol
+- Unified LSST preprocessing (padding to window=36, standardization on train only).
+- Stratified train/val split with fixed seeds.
+- Report accuracy and macro-F1 over **15 runs** to capture variance.
+This is orchestrated in `src/training/adapting_to_classification.py`.
+
 ## Repository Structure
 - `src/` code for models, training, and data.
 - `notebooks/` EDA and training notebooks.
 - `configs/` YAMLs for pretrained and fine-tuning settings.
 - `artifacts/` generated outputs (models, reports, experiments).
 - `data/` local datasets (not tracked).
+
+## Code Structure (Where to Find Things)
+### Data
+- `src/data/dataloader.py`: `build_lsst_dataloaders`, `build_etth1_dataloaders`, `pad_truncate`, `LSST_WINDOW`.
+
+### Models
+- `src/models/indpatchtst.py`: backbone definition + ETTh1 pretraining entry point (saves `artifacts/models/best_indpatch_tst_optuna.pth`).
+- `src/models/indpatchtst_classifier.py`: classifier wrapper and freezing strategies.
+- `src/models/cnn_baseline.py`: CNN baseline model.
+
+### Training / Evaluation
+- `src/training/train_indpatchtst_reg.py`: ETTh1 regression training loop.
+- `src/training/train_indpatchtst_class.py`: LSST classification training/eval utilities (`train_loop`, `evaluate`).
+- `src/training/optuna_search.py`: Optuna objectives for each strategy.
+- `src/training/adapting_to_classification.py`: main experiment runner, config I/O, multi-run stats.
+- `src/training/indpatchtst_clf_utils.py`: helper functions for augmentation and model assembly.
+- `src/training/trainer_cnn.py`: CNN baseline training loop.
+
+### Notebooks (Repro Path)
+- `notebooks/01_eda.ipynb`: data exploration.
+- `notebooks/02_train_cnn.ipynb`: CNN baseline + stats.
+- `notebooks/03_pretrain_indpatchtst.ipynb`: Optuna pretraining (ETTh1).
+- `notebooks/04_train_indpatchtst_classifier.ipynb`: transfer strategies + stats.
+
+## Generated Files (What Appears Where)
+- `configs/*.yml`: Optuna best configs for backbone and fine-tuning.
+- `artifacts/models/best_indpatch_tst_optuna.pth`: pretrained backbone checkpoint.
+- `artifacts/reports/`: aggregated outputs (if generated).
+- `lsst_statistics_complete.pth`: saved in the current working directory when running `adapting_to_classification.py` as a script.
 
 ## Setup
 ```bash

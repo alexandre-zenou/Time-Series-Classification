@@ -3,6 +3,7 @@ adapting_to_classification.py — Fine-tuning IndPatchTST (ETTh1→LSST)
 """
 
 import os
+from pathlib import Path
 from collections import defaultdict
 
 import numpy as np
@@ -25,7 +26,9 @@ from src.training.indpatchtst_clf_utils import augment_batch, build_clf_model
 
 LSST_WINDOW = 36
 
-CONFIG_DIR = "configs"
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+CONFIG_DIR = str(PROJECT_ROOT / "configs")
+ARTIFACTS_DIR = str(PROJECT_ROOT / "artifacts")
 
 # DEFAULTS OPTUNA (au cas où les YAMLs n'existent pas, pour debug ou runs rapides)
 DEFAULT_PARAMS_HEAD_ONLY = {
@@ -156,19 +159,19 @@ def run_single_experiment(
         "A_scratch": ("From Scratch (baseline)", None, "scratch", 60),
         "B_head_only": (
             "Head Only",
-            "artifacts/models/best_indpatch_tst_optuna.pth",
+            os.path.join(ARTIFACTS_DIR, "models", "best_indpatch_tst_optuna.pth"),
             "head_only",
             60,
         ),
         "C_late_enc": (
             "Late Encoders + Head",
-            "artifacts/models/best_indpatch_tst_optuna.pth",
+            os.path.join(ARTIFACTS_DIR, "models", "best_indpatch_tst_optuna.pth"),
             "late_enc",
             50,
         ),
         "D_full_tune": (
             "Full Fine-tune (lr différenciés)",
-            "artifacts/models/best_indpatch_tst_optuna.pth",
+            os.path.join(ARTIFACTS_DIR, "models", "best_indpatch_tst_optuna.pth"),
             "full",
             40,
         ),
@@ -389,7 +392,7 @@ def print_statistics(all_results, baseline=0.40):
 if __name__ == "__main__":
     train_dl0, val_dl0, test_dl0, scaler, le, n_classes, n_features = build_lsst_dataloaders(seed=0)
 
-    os.makedirs("artifacts/models", exist_ok=True)
+    os.makedirs(os.path.join(ARTIFACTS_DIR, "models"), exist_ok=True)
     os.makedirs(CONFIG_DIR, exist_ok=True)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device : {device}")
